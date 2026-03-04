@@ -1,0 +1,77 @@
+[package]
+name = "todizzy"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal macOS menu bar notes app"
+
+[[bin]]
+name = "todizzy"
+path = "src/main.rs"
+
+# ─── Dependencies ────────────────────────────────────────────────────────────
+#
+# objc2 family: direct AppKit bindings, no webview, no Electron.
+#   Binary stays ~2 MB, cold-launch <150 ms, full access to NSStatusBar,
+#   NSEvent (trackpad), NSTextView for native editing, NSPanel for the HUD.
+#
+# serde + serde_json: zero-overhead serialisation for settings and notes.
+#   Simple flat files; no embedded DB needed for a personal scratch-pad.
+#
+[dependencies]
+
+# ── Objective-C / AppKit runtime ─────────────────────────────────────────────
+objc2 = "0.5"
+
+objc2-foundation = { version = "0.2", features = [
+    "NSDate",
+    "NSNotification",
+    "NSString",
+    "NSThread",
+    "NSTimer",
+    "NSURL",
+    "NSArray",
+    "NSProcessInfo",
+    "NSUserDefaults",
+] }
+
+objc2-app-kit = { version = "0.2", features = [
+    "NSApplication",
+    "NSButton",
+    "NSColor",
+    "NSControl",
+    "NSEvent",
+    "NSFont",
+    "NSFontDescriptor",   # required for monospacedSystemFontOfSize:weight:
+    "NSGraphics",         # NSBackingStoreType
+    "NSLayoutManager",
+    "NSMenu",
+    "NSMenuItem",
+    "NSPanel",
+    "NSResponder",
+    "NSRunningApplication",  # NSApplicationActivationPolicy + setActivationPolicy
+    "NSScreen",
+    "NSScrollView",
+    "NSSegmentedControl", # settings window mode selector
+    "NSStatusBar",
+    "NSStatusBarButton",  # required by NSStatusItem::button()
+    "NSStatusItem",
+    "NSText",             # setString:, selectedRange
+    "NSTextContainer",
+    "NSTextField",
+    "NSTextStorage",
+    "NSTextView",
+    "NSView",
+    "NSWindow",
+] }
+
+# ── Serialisation ─────────────────────────────────────────────────────────────
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── Release profile: tiny, fast binary ───────────────────────────────────────
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
+strip         = true
+panic         = "abort"
