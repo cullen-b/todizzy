@@ -119,6 +119,12 @@ impl Buffer {
         self.cursor = 0;
     }
 
+    /// Append a newline at the very end without moving the cursor.
+    /// Used when `j` is pressed on the last line.
+    pub fn push_newline_at_end(&mut self) {
+        self.content.push('\n');
+    }
+
     // ── Cursor motions ────────────────────────────────────────────────────────
 
     pub fn move_left(&mut self, n: usize) {

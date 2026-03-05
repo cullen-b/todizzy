@@ -215,6 +215,12 @@ fn handle_normal(key: Key, pending: &mut VimPending, actions: &mut Vec<EditorAct
             actions.push(EditorAction::SetMode(Mode::Visual { line: true }))
         }
 
+        // Enter: create a new line below current line, stay in Normal mode
+        Key::Enter => {
+            actions.push(EditorAction::Move(Motion::LineEnd));
+            actions.push(EditorAction::InsertChar('\n'));
+        }
+
         // Undo / redo
         Key::Char('u') => actions.push(EditorAction::Undo),
 

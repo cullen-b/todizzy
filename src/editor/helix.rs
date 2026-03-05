@@ -85,9 +85,9 @@ fn handle_normal(key: Key, pending: &mut VimPending, actions: &mut Vec<EditorAct
         Key::Char('k') | Key::Up => {
             actions.push(EditorAction::Move(Motion::Up(n)))
         }
-        Key::Char('w') => actions.push(EditorAction::Move(Motion::WordForward(n))),
-        Key::Char('b') => actions.push(EditorAction::Move(Motion::WordBackward(n))),
-        Key::Char('e') => actions.push(EditorAction::Move(Motion::WordEnd)),
+        Key::Char('w') => actions.push(EditorAction::MoveExtend(Motion::WordForward(n))),
+        Key::Char('b') => actions.push(EditorAction::MoveExtend(Motion::WordBackward(n))),
+        Key::Char('e') => actions.push(EditorAction::MoveExtend(Motion::WordEnd)),
         Key::Char('0') => actions.push(EditorAction::Move(Motion::LineStart)),
         Key::Char('$') => actions.push(EditorAction::Move(Motion::LineEnd)),
         Key::Char('G') => actions.push(EditorAction::Move(Motion::LastLine)),
@@ -124,6 +124,12 @@ fn handle_normal(key: Key, pending: &mut VimPending, actions: &mut Vec<EditorAct
         // ── Paste ─────────────────────────────────────────────────────────
         Key::Char('p') => actions.push(EditorAction::PasteAfter),
         Key::Char('P') => actions.push(EditorAction::PasteBefore),
+
+        // Enter: create a new line below current line, stay in Normal mode
+        Key::Enter => {
+            actions.push(EditorAction::Move(Motion::LineEnd));
+            actions.push(EditorAction::InsertChar('\n'));
+        }
 
         // ── Undo ─────────────────────────────────────────────────────────
         Key::Char('u') => actions.push(EditorAction::Undo),

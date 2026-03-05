@@ -58,8 +58,10 @@ impl Default for Mode {
 /// The UI applies them to the on-screen text view.
 #[derive(Debug, Clone)]
 pub enum EditorAction {
-    /// Move cursor according to motion.
+    /// Move cursor and collapse selection to new position (h/j/k/l etc.).
     Move(Motion),
+    /// Move cursor and extend selection from current anchor (w/b/e in Helix).
+    MoveExtend(Motion),
     /// Insert a single character at cursor.
     InsertChar(char),
     /// Delete one character to the left (backspace).
@@ -123,7 +125,7 @@ impl EditorEngine {
         Self {
             buf,
             mode: Mode::Normal,
-            selection_anchor: None,
+            selection_anchor: if motion_mode == MotionMode::Helix { Some(0) } else { None },
             pending: VimPending::default(),
             yank_reg: String::new(),
             undo_stack: VecDeque::new(),
@@ -136,14 +138,19 @@ impl EditorEngine {
         self.buf.set_content(content);
         self.mode = Mode::Normal;
         self.pending = VimPending::default();
-        self.selection_anchor = None;
+        self.selection_anchor = if self.motion_mode == MotionMode::Helix { Some(0) } else { None };
         self.undo_stack.clear();
         self.undo_pos = 0;
     }
 
     pub fn set_motion_mode(&mut self, m: MotionMode) {
         self.motion_mode = m;
+        if m == MotionMode::Helix && self.mode == Mode::Normal {
+            self.selection_anchor = Some(self.buf.cursor());
+        }
     }
+
+    pub fn motion_mode(&self) -> MotionMode { self.motion_mode }
 
     /// Process one key event.  Returns true if the buffer was mutated.
     pub fn process_key(&mut self, key: Key) -> bool {
@@ -167,6 +174,14 @@ impl EditorEngine {
         }
 
         let mutated = self.apply_actions(actions);
+
+        // Safety net: Helix always has an anchor in Normal mode.
+        if self.motion_mode == MotionMode::Helix
+            && self.mode == Mode::Normal
+            && self.selection_anchor.is_none()
+        {
+            self.selection_anchor = Some(self.buf.cursor());
+        }
 
         if mutated {
             // Push undo snapshot
@@ -225,14 +240,34 @@ impl EditorEngine {
                 EditorAction::SetMode(m) => {
                     if matches!(m, Mode::Visual { .. }) && self.selection_anchor.is_none() {
                         self.selection_anchor = Some(self.buf.cursor());
-                    } else if m == Mode::Normal || m == Mode::Insert {
+                    } else if m == Mode::Normal {
+                        if self.motion_mode == MotionMode::Helix {
+                            self.selection_anchor = Some(self.buf.cursor());
+                        } else {
+                            self.selection_anchor = None;
+                        }
+                    } else if m == Mode::Insert {
                         self.selection_anchor = None;
                     }
                     self.mode = m;
                 }
 
                 EditorAction::Move(motion) => {
-                    self.apply_motion(&motion);
+                    if self.apply_motion(&motion) {
+                        mutated = true;
+                    }
+                    // Helix Normal: collapse selection to the new cursor position.
+                    if self.motion_mode == MotionMode::Helix && self.mode == Mode::Normal {
+                        self.selection_anchor = Some(self.buf.cursor());
+                    }
+                }
+
+                EditorAction::MoveExtend(motion) => {
+                    // Apply motion without touching the anchor — extends the selection
+                    // from wherever the anchor already sits (old cursor position).
+                    if self.apply_motion(&motion) {
+                        mutated = true;
+                    }
                 }
 
                 EditorAction::InsertChar(c) => {
@@ -268,18 +303,36 @@ impl EditorEngine {
                 }
 
                 EditorAction::DeleteSelection | EditorAction::YankSelection => {
-                    if let Some(anchor) = self.selection_anchor {
-                        let cursor = self.buf.cursor();
-                        let (lo, hi) = if anchor <= cursor {
-                            (anchor, cursor)
-                        } else {
-                            (cursor, anchor)
-                        };
+                    let cursor = self.buf.cursor();
+                    let (lo, hi) = {
+                        let text = self.buf.as_str();
+                        match self.selection_anchor {
+                            Some(a) if a != cursor => {
+                                if a < cursor { (a, cursor) } else { (cursor, a) }
+                            }
+                            _ => {
+                                if self.motion_mode == MotionMode::Helix {
+                                    // Collapsed selection: operate on character under cursor.
+                                    let next = text[cursor..].chars().next()
+                                        .map(|c| cursor + c.len_utf8())
+                                        .unwrap_or(cursor);
+                                    (cursor, next)
+                                } else {
+                                    (cursor, cursor) // no-op for Vim
+                                }
+                            }
+                        }
+                    };
+                    if lo < hi {
                         self.yank_reg = self.buf.as_str()[lo..hi].to_owned();
                         if matches!(action, EditorAction::DeleteSelection) {
                             self.buf.delete_range(lo, hi);
                             mutated = true;
                         }
+                    }
+                    if self.motion_mode == MotionMode::Helix {
+                        self.selection_anchor = Some(self.buf.cursor());
+                    } else {
                         self.selection_anchor = None;
                         self.mode = Mode::Normal;
                     }
@@ -338,20 +391,37 @@ impl EditorEngine {
 
     // ── Motion execution ──────────────────────────────────────────────────────
 
-    fn apply_motion(&mut self, motion: &Motion) {
+    /// Returns `true` if the buffer content was mutated (e.g. new lines created).
+    fn apply_motion(&mut self, motion: &Motion) -> bool {
         match motion {
-            Motion::Left(n) => self.buf.move_left(*n),
-            Motion::Right(n) => self.buf.move_right(*n),
-            Motion::Up(n) => self.buf.move_up(*n),
-            Motion::Down(n) => self.buf.move_down(*n),
-            Motion::WordForward(n) => self.buf.move_word_forward(*n),
-            Motion::WordBackward(n) => self.buf.move_word_backward(*n),
-            Motion::WordEnd => self.buf.move_word_end(1),
-            Motion::LineStart => self.buf.move_to_line_start(),
-            Motion::LineEnd => self.buf.move_to_line_end(),
-            Motion::FirstNonBlank => self.buf.move_to_first_nonblank(),
-            Motion::FirstLine => self.buf.move_to_first_line(),
-            Motion::LastLine => self.buf.move_to_last_line(),
+            Motion::Left(n) => { self.buf.move_left(*n); false }
+            Motion::Right(n) => { self.buf.move_right(*n); false }
+            Motion::Up(n) => { self.buf.move_up(*n); false }
+            Motion::Down(n) => {
+                // If already on the last line, append an empty line so `j`
+                // never gets stuck at the bottom of the note.
+                let (line, _) = self.buf.cursor_lc();
+                let max_line = self.buf.line_count().saturating_sub(1);
+                if line + n > max_line {
+                    let needed = (line + n) - max_line;
+                    for _ in 0..needed {
+                        self.buf.push_newline_at_end();
+                    }
+                    self.buf.move_down(*n);
+                    true // buffer was mutated
+                } else {
+                    self.buf.move_down(*n);
+                    false
+                }
+            }
+            Motion::WordForward(n) => { self.buf.move_word_forward(*n); false }
+            Motion::WordBackward(n) => { self.buf.move_word_backward(*n); false }
+            Motion::WordEnd => { self.buf.move_word_end(1); false }
+            Motion::LineStart => { self.buf.move_to_line_start(); false }
+            Motion::LineEnd => { self.buf.move_to_line_end(); false }
+            Motion::FirstNonBlank => { self.buf.move_to_first_nonblank(); false }
+            Motion::FirstLine => { self.buf.move_to_first_line(); false }
+            Motion::LastLine => { self.buf.move_to_last_line(); false }
         }
     }
 }
@@ -400,6 +470,56 @@ mod tests {
         let mut e = vim_engine("hello world foo");
         keys(&mut e, &[Key::Char('w')]);
         assert_eq!(e.buf.cursor(), 6);
+    }
+
+    fn helix_engine(s: &str) -> EditorEngine {
+        EditorEngine::new(s.into(), MotionMode::Helix)
+    }
+
+    #[test]
+    fn helix_anchor_always_set_in_normal() {
+        let e = helix_engine("hello world");
+        assert_eq!(e.selection_anchor, Some(0));
+    }
+
+    #[test]
+    fn helix_w_then_d_deletes_word() {
+        let mut e = helix_engine("hello world");
+        // `w` extends from anchor=0 to cursor=6 → "hello " selected
+        keys(&mut e, &[Key::Char('w')]);
+        assert_eq!(e.selection_anchor, Some(0));
+        assert_eq!(e.buf.cursor(), 6);
+        // `d` deletes the selection
+        keys(&mut e, &[Key::Char('d')]);
+        assert_eq!(e.buf.as_str(), "world");
+    }
+
+    #[test]
+    fn helix_h_collapses_selection() {
+        let mut e = helix_engine("hello world");
+        // `w` selects "hello "
+        keys(&mut e, &[Key::Char('w')]);
+        assert_eq!(e.selection_anchor, Some(0));
+        assert_eq!(e.buf.cursor(), 6);
+        // `h` moves left and collapses — no more extended selection
+        keys(&mut e, &[Key::Char('h')]);
+        assert_eq!(e.buf.cursor(), 5);
+        assert_eq!(e.selection_anchor, Some(5)); // collapsed at new cursor
+    }
+
+    #[test]
+    fn helix_d_alone_deletes_char() {
+        let mut e = helix_engine("hello");
+        // No movement: anchor == cursor → deletes 'h'
+        keys(&mut e, &[Key::Char('d')]);
+        assert_eq!(e.buf.as_str(), "ello");
+    }
+
+    #[test]
+    fn helix_x_then_d_deletes_line() {
+        let mut e = helix_engine("hello\nworld");
+        keys(&mut e, &[Key::Char('x'), Key::Char('d')]);
+        assert!(!e.buf.as_str().contains("hello"));
     }
 
     #[test]

@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Todizzy — Menu Bar Notes for macOS</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #0f0f10;
+      --surface: #1a1a1e;
+      --border:  #2a2a30;
+      --text:    #e8e8ea;
+      --muted:   #888896;
+      --blue:    #4a90f5;
+      --blue-hl: #6aaaff;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    /* ── Nav ── */
+    nav {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 20px 48px;
+      border-bottom: 1px solid var(--border);
+    }
+    .logo { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
+    .nav-links { display: flex; gap: 24px; }
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 14px;
+      transition: color 0.15s;
+    }
+    .nav-links a:hover { color: var(--text); }
+
+    /* ── Hero ── */
+    .hero {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 100px 24px 80px;
+      text-align: center;
+    }
+    .badge {
+      display: inline-block;
+      background: rgba(74,144,245,0.15);
+      color: var(--blue-hl);
+      border: 1px solid rgba(74,144,245,0.3);
+      border-radius: 999px;
+      padding: 4px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      margin-bottom: 28px;
+    }
+    h1 {
+      font-size: clamp(40px, 6vw, 64px);
+      font-weight: 800;
+      letter-spacing: -1.5px;
+      line-height: 1.08;
+      margin-bottom: 20px;
+    }
+    h1 span { color: var(--blue-hl); }
+    .subtitle {
+      font-size: 18px;
+      color: var(--muted);
+      max-width: 520px;
+      margin: 0 auto 40px;
+    }
+    .cta-group { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    .btn-primary {
+      background: var(--blue);
+      color: #fff;
+      padding: 13px 28px;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 600;
+      text-decoration: none;
+      transition: background 0.15s, transform 0.1s;
+    }
+    .btn-primary:hover { background: var(--blue-hl); transform: translateY(-1px); }
+    .btn-secondary {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 13px 28px;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 600;
+      text-decoration: none;
+      transition: border-color 0.15s, transform 0.1s;
+    }
+    .btn-secondary:hover { border-color: #555; transform: translateY(-1px); }
+    .req {
+      margin-top: 14px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    /* ── Mock window ── */
+    .window-wrap {
+      max-width: 520px;
+      margin: 72px auto 0;
+      padding: 0 24px;
+    }
+    .mock-window {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 40px 80px rgba(0,0,0,0.5);
+    }
+    .mock-titlebar {
+      background: #222228;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      border-bottom: 1px solid var(--border);
+    }
+    .dot { width: 11px; height: 11px; border-radius: 50%; }
+    .dot.close  { background: #3a3a3a; }
+    .dot.min    { background: #3a3a3a; }
+    .dot.zoom   { background: #3a3a3a; }
+    .mock-mode {
+      margin-left: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--blue-hl);
+      font-family: "SF Mono", "Fira Mono", monospace;
+    }
+    .mock-nav {
+      margin-left: auto;
+      font-size: 13px;
+      color: var(--muted);
+      font-family: "SF Mono", "Fira Mono", monospace;
+    }
+    .mock-body {
+      padding: 18px 20px 28px;
+      font-family: "SF Mono", "Fira Mono", monospace;
+      font-size: 13px;
+      line-height: 1.7;
+      min-height: 160px;
+    }
+    .mock-cursor {
+      display: inline-block;
+      width: 9px;
+      height: 1.1em;
+      background: var(--blue-hl);
+      vertical-align: text-bottom;
+      border-radius: 2px;
+      animation: blink 1.2s step-end infinite;
+      opacity: 0.85;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+    .md-h1    { color: #e8e8ea; font-weight: 700; font-size: 15px; }
+    .md-bold  { font-weight: 700; }
+    .md-gray  { color: var(--muted); }
+    .md-teal  { color: #3db8b8; }
+
+    /* ── Features ── */
+    .features {
+      max-width: 900px;
+      margin: 100px auto 0;
+      padding: 0 24px;
+    }
+    .section-label {
+      text-align: center;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--blue);
+      margin-bottom: 14px;
+    }
+    .section-title {
+      text-align: center;
+      font-size: clamp(26px, 4vw, 36px);
+      font-weight: 800;
+      letter-spacing: -0.8px;
+      margin-bottom: 56px;
+    }
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+    }
+    .feature-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+    }
+    .feature-icon { font-size: 22px; margin-bottom: 12px; }
+    .feature-card h3 { font-size: 15px; font-weight: 700; margin-bottom: 6px; }
+    .feature-card p { font-size: 13px; color: var(--muted); line-height: 1.6; }
+
+    /* ── Install ── */
+    .install {
+      max-width: 640px;
+      margin: 100px auto 0;
+      padding: 0 24px;
+    }
+    .install-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 36px 40px;
+    }
+    .install h2 { font-size: 24px; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 24px; }
+    .step {
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+      margin-bottom: 20px;
+    }
+    .step:last-child { margin-bottom: 0; }
+    .step-num {
+      flex-shrink: 0;
+      width: 26px; height: 26px;
+      background: rgba(74,144,245,0.15);
+      color: var(--blue-hl);
+      border-radius: 50%;
+      font-size: 12px;
+      font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .step-body { font-size: 14px; padding-top: 3px; }
+    .step-body strong { display: block; margin-bottom: 3px; }
+    .step-body span { color: var(--muted); font-size: 13px; }
+    code {
+      background: rgba(255,255,255,0.07);
+      border-radius: 5px;
+      padding: 1px 6px;
+      font-family: "SF Mono", "Fira Mono", monospace;
+      font-size: 12px;
+    }
+    .gatekeeper-note {
+      margin-top: 24px;
+      padding: 14px 16px;
+      background: rgba(255,200,50,0.07);
+      border: 1px solid rgba(255,200,50,0.2);
+      border-radius: 8px;
+      font-size: 13px;
+      color: #c8aa60;
+    }
+
+    /* ── Footer ── */
+    footer {
+      margin-top: 100px;
+      border-top: 1px solid var(--border);
+      padding: 32px 48px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    footer span { font-size: 13px; color: var(--muted); }
+    footer a { color: var(--muted); text-decoration: none; font-size: 13px; }
+    footer a:hover { color: var(--text); }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <div class="logo">🗒 Todizzy</div>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/cullen-b/todizzy">GitHub</a>
+    </div>
+  </nav>
+
+  <!-- ── Hero ── -->
+  <section class="hero">
+    <div class="badge">macOS · Free & Open Source</div>
+    <h1>Notes that stay<br><span>out of your way</span></h1>
+    <p class="subtitle">
+      A tiny menu-bar notepad for macOS. Click the icon, type, click away.
+      Vim and Helix keybindings included.
+    </p>
+    <div class="cta-group">
+      <a class="btn-primary" href="https://github.com/cullen-b/todizzy/releases/latest/download/Todizzy.zip">
+        ↓ Download for Mac
+      </a>
+      <a class="btn-secondary" href="https://github.com/cullen-b/todizzy">
+        View source
+      </a>
+    </div>
+    <p class="req">macOS 13+ · Apple Silicon &amp; Intel · ~400 KB</p>
+  </section>
+
+  <!-- ── Mock window ── -->
+  <div class="window-wrap">
+    <div class="mock-window">
+      <div class="mock-titlebar">
+        <div class="dot close"></div>
+        <div class="dot min"></div>
+        <div class="dot zoom"></div>
+        <div class="mock-mode">N</div>
+        <div class="mock-nav">‹ ›</div>
+      </div>
+      <div class="mock-body">
+        <div class="md-h1"># Today</div>
+        <div>&nbsp;</div>
+        <div><span class="md-bold">**Ship landing page**</span> ✓</div>
+        <div><span class="md-gray">&gt; remember to push after</span></div>
+        <div>&nbsp;</div>
+        <div>Buy oat milk &amp; <span class="md-teal">`git push`</span><span class="mock-cursor"></span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Features ── -->
+  <section class="features" id="features">
+    <p class="section-label">Why Todizzy</p>
+    <h2 class="section-title">Everything you need.<br>Nothing you don't.</h2>
+
+    <div class="feature-grid">
+      <div class="feature-card">
+        <div class="feature-icon">⚡</div>
+        <h3>Lives in your menu bar</h3>
+        <p>One click to open, one click (or Esc Esc) to close. Never loses your place.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📄</div>
+        <h3>Multiple notes</h3>
+        <p>Swipe or use ‹ › to flip between pages. Plain <code>.txt</code> files on disk — no lock-in.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">⌨️</div>
+        <h3>Vim &amp; Helix keybindings</h3>
+        <p>Full modal editing — Normal, Insert, Visual modes. Or turn it off and just type.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">✍️</div>
+        <h3>Live markdown</h3>
+        <p>Headings, bold, italic, inline code, blockquotes, and strikethrough rendered as you type.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">☁️</div>
+        <h3>Git sync</h3>
+        <p>Point it at a GitHub repo and it pulls on open, pushes on close. No account required beyond git.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🦀</div>
+        <h3>Native &amp; tiny</h3>
+        <p>Pure Rust + AppKit. No Electron, no webview. ~400 KB binary, &lt;150 ms cold launch.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Install ── -->
+  <section class="install" id="install">
+    <div class="install-box">
+      <h2>Get started in 30 seconds</h2>
+
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <strong>Download</strong>
+          <span>Click the download button above to get <code>Todizzy.zip</code>.</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <strong>Unzip and move</strong>
+          <span>Double-click the zip, then drag <code>Todizzy.app</code> to your <code>/Applications</code> folder.</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <strong>Open it</strong>
+          <span>Double-click to launch. A 🗒 icon appears in your menu bar — click it to start writing.</span>
+        </div>
+      </div>
+
+      <div class="gatekeeper-note">
+        <strong>First launch:</strong> macOS may say it "cannot verify the developer."
+        Right-click (or Control-click) <code>Todizzy.app</code> → <strong>Open</strong> → <strong>Open</strong> to allow it once.
+        This happens because the app isn't notarized yet.
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>© 2025 Todizzy · <a href="https://github.com/cullen-b/todizzy/blob/main/LICENSE">MIT License</a></span>
+    <span>
+      <a href="https://github.com/cullen-b/todizzy/releases">All releases</a> ·
+      <a href="https://github.com/cullen-b/todizzy/issues">Report a bug</a> ·
+      <a href="https://github.com/cullen-b/todizzy">GitHub</a>
+    </span>
+  </footer>
+
+</body>
+</html>

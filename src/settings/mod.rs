@@ -42,6 +42,19 @@ pub struct Settings {
 
     /// Initial window height in points.
     pub window_height: f64,
+
+    /// Show the ‹ › note-navigation arrow buttons.
+    pub show_nav_arrows: bool,
+
+    /// Show the page-indicator dots at the top of the window.
+    pub show_page_dots: bool,
+
+    /// Show the N / I / V mode indicator.
+    pub show_mode_indicator: bool,
+
+    /// Automatically `git pull` on open and `git push` on close.
+    /// Requires the user to have initialised a git repo in the notes directory.
+    pub git_sync: bool,
 }
 
 impl Default for Settings {
@@ -52,6 +65,10 @@ impl Default for Settings {
             font_size: 14.0,
             window_width: 360.0,
             window_height: 420.0,
+            show_nav_arrows: true,
+            show_page_dots: true,
+            show_mode_indicator: true,
+            git_sync: false,
         }
     }
 }
