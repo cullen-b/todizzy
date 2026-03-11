@@ -60,8 +60,10 @@ impl Default for Mode {
 pub enum EditorAction {
     /// Move cursor and collapse selection to new position (h/j/k/l etc.).
     Move(Motion),
-    /// Move cursor and extend selection from current anchor (w/b/e in Helix).
+    /// Move cursor and extend selection from current anchor (w/b/e in Helix Visual).
     MoveExtend(Motion),
+    /// Move cursor, resetting anchor to current position first (w/b/e in Helix Normal).
+    MoveSel(Motion),
     /// Insert a single character at cursor.
     InsertChar(char),
     /// Delete one character to the left (backspace).
@@ -270,6 +272,15 @@ impl EditorEngine {
                     }
                 }
 
+                EditorAction::MoveSel(motion) => {
+                    // Fresh selection: anchor snaps to the cursor first, THEN we move.
+                    // Each press produces a one-motion selection rather than accumulating.
+                    self.selection_anchor = Some(self.buf.cursor());
+                    if self.apply_motion(&motion) {
+                        mutated = true;
+                    }
+                }
+
                 EditorAction::InsertChar(c) => {
                     self.buf.insert(&c.to_string());
                     mutated = true;
@@ -359,7 +370,11 @@ impl EditorEngine {
                 }
 
                 EditorAction::PasteAfter => {
-                    let pos = self.buf.cursor() + 1;
+                    let cursor = self.buf.cursor();
+                    // Advance past the current character (which may be multi-byte).
+                    let pos = self.buf.as_str()[cursor..].chars().next()
+                        .map(|c| cursor + c.len_utf8())
+                        .unwrap_or(cursor); // at EOB → paste at end
                     let text = self.yank_reg.clone();
                     self.buf.replace_range(pos, pos, &text);
                     mutated = true;
@@ -485,13 +500,26 @@ mod tests {
     #[test]
     fn helix_w_then_d_deletes_word() {
         let mut e = helix_engine("hello world");
-        // `w` extends from anchor=0 to cursor=6 → "hello " selected
+        // `w` resets anchor to 0 (cursor was 0) then moves to 6 → "hello " selected
         keys(&mut e, &[Key::Char('w')]);
         assert_eq!(e.selection_anchor, Some(0));
         assert_eq!(e.buf.cursor(), 6);
         // `d` deletes the selection
         keys(&mut e, &[Key::Char('d')]);
         assert_eq!(e.buf.as_str(), "world");
+    }
+
+    #[test]
+    fn helix_w_w_gives_fresh_selections() {
+        let mut e = helix_engine("hello world foo");
+        // First `w`: anchor=0 → cursor=6 ("hello " selected)
+        keys(&mut e, &[Key::Char('w')]);
+        assert_eq!(e.selection_anchor, Some(0));
+        assert_eq!(e.buf.cursor(), 6);
+        // Second `w`: anchor resets to 6, cursor moves to 12 ("world " selected — NOT "hello world ")
+        keys(&mut e, &[Key::Char('w')]);
+        assert_eq!(e.selection_anchor, Some(6));
+        assert_eq!(e.buf.cursor(), 12);
     }
 
     #[test]

@@ -275,53 +275,71 @@ impl Buffer {
     }
 
     fn next_word_start(&self, from: usize) -> usize {
-        let bytes = self.content.as_bytes();
+        // Iterate chars so we always land on char boundaries.
         let mut i = from;
-        // Skip current word chars
-        while i < bytes.len() && Self::is_word_char(bytes[i]) {
-            i += 1;
+        // Skip chars that belong to the current word.
+        for c in self.content[from..].chars() {
+            if !Self::is_word_char_c(c) { break; }
+            i += c.len_utf8();
         }
-        // Skip whitespace
-        while i < bytes.len() && !Self::is_word_char(bytes[i]) {
-            i += 1;
+        // Skip non-word chars (whitespace / punctuation) between words.
+        for c in self.content[i..].chars() {
+            if Self::is_word_char_c(c) { break; }
+            i += c.len_utf8();
         }
         i
     }
 
     fn prev_word_start(&self, from: usize) -> usize {
-        let bytes = self.content.as_bytes();
-        let mut i = from;
-        if i == 0 {
-            return 0;
+        if from == 0 { return 0; }
+        // Collect chars before `from` so we can iterate in reverse.
+        let before = &self.content[..from];
+        let chars: Vec<(usize, char)> = before.char_indices().collect();
+        let mut end = chars.len();
+        // Skip whitespace / punctuation going backwards.
+        while end > 0 && !Self::is_word_char_c(chars[end - 1].1) {
+            end -= 1;
         }
-        i -= 1;
-        // Skip whitespace
-        while i > 0 && !Self::is_word_char(bytes[i]) {
-            i -= 1;
+        // Skip word chars going backwards.
+        while end > 0 && Self::is_word_char_c(chars[end - 1].1) {
+            end -= 1;
         }
-        // Skip word chars
-        while i > 0 && Self::is_word_char(bytes[i - 1]) {
-            i -= 1;
-        }
-        i
+        if end < chars.len() { chars[end].0 } else { from }
     }
 
     fn word_end(&self, from: usize) -> usize {
-        let bytes = self.content.as_bytes();
-        let mut i = from;
-        if i + 1 >= bytes.len() {
-            return i;
+        let rest = &self.content[from..];
+        let mut chars = rest.char_indices();
+        // Skip the char at `from` (we start searching from the next char).
+        match chars.next() {
+            None => return from,
+            Some(_) => {}
         }
-        i += 1;
-        while i < bytes.len() && !Self::is_word_char(bytes[i]) {
-            i += 1;
+        // Skip non-word chars.
+        let mut last_word_byte = from;
+        let mut found_word = false;
+        for (off, c) in rest.char_indices().skip(1) {
+            if !found_word {
+                if Self::is_word_char_c(c) {
+                    found_word = true;
+                    last_word_byte = from + off;
+                }
+            } else {
+                if Self::is_word_char_c(c) {
+                    last_word_byte = from + off;
+                } else {
+                    break;
+                }
+            }
         }
-        while i + 1 < bytes.len() && Self::is_word_char(bytes[i + 1]) {
-            i += 1;
-        }
-        i
+        last_word_byte
     }
 
+    fn is_word_char_c(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
+    }
+
+    #[allow(dead_code)]
     fn is_word_char(b: u8) -> bool {
         b.is_ascii_alphanumeric() || b == b'_'
     }

@@ -255,6 +255,32 @@
       color: #c8aa60;
     }
 
+    /* ── Git sync ── */
+    .git-sync {
+      max-width: 640px;
+      margin: 60px auto 0;
+      padding: 0 24px;
+    }
+    .git-sync .install-box h2 { margin-bottom: 8px; }
+    .git-sync-subtitle {
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 28px;
+    }
+    .code-block {
+      background: #111115;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      font-family: "SF Mono", "Fira Mono", monospace;
+      font-size: 12px;
+      color: #c8d3f0;
+      margin: 8px 0 4px;
+      overflow-x: auto;
+      white-space: pre;
+    }
+    .step-body .code-block { margin-top: 6px; }
+
     /* ── Footer ── */
     footer {
       margin-top: 100px;
@@ -278,6 +304,7 @@
     <div class="nav-links">
       <a href="#features">Features</a>
       <a href="#install">Install</a>
+      <a href="#git-sync">Git sync</a>
       <a href="https://github.com/cullen-b/todizzy">GitHub</a>
     </div>
   </nav>
@@ -294,8 +321,8 @@
       <a class="btn-primary" href="https://github.com/cullen-b/todizzy/releases/latest/download/Todizzy.zip">
         ↓ Download for Mac
       </a>
-      <a class="btn-secondary" href="https://github.com/cullen-b/todizzy">
-        View source
+      <a class="btn-secondary" href="https://venmo.com/u/SupahCullen">
+        ☕ Buy me a coffee
       </a>
     </div>
     <p class="req">macOS 13+ · Apple Silicon &amp; Intel · ~400 KB</p>
@@ -392,6 +419,62 @@
         <strong>First launch:</strong> macOS may say it "cannot verify the developer."
         Right-click (or Control-click) <code>Todizzy.app</code> → <strong>Open</strong> → <strong>Open</strong> to allow it once.
         This happens because the app isn't notarized yet.
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Git sync ── -->
+  <section class="git-sync" id="git-sync">
+    <div class="install-box">
+      <h2>Setting up Git sync</h2>
+      <p class="git-sync-subtitle">Keep your notes backed up and in sync across Macs via any GitHub repo. Takes about two minutes.</p>
+
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <strong>Create a private GitHub repo</strong>
+          <span>Go to <a href="https://github.com/new" style="color:var(--blue-hl);text-decoration:none;">github.com/new</a>, name it something like <code>my-notes</code>, set it to <strong>Private</strong>, and click <em>Create repository</em>.</span>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <strong>Init the notes folder as a git repo</strong>
+          <span>Open Terminal and run:</span>
+          <div class="code-block">cd ~/Library/Application\ Support/todizzy/notes
+git init
+git remote add origin https://github.com/YOUR_USERNAME/my-notes.git
+git add .
+git commit -m "initial notes"
+git push -u origin main</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <strong>Enable Git sync in Todizzy</strong>
+          <span>Right-click the 🗒 menu bar icon → <strong>Settings</strong>, then toggle <em>Git sync</em> on. Todizzy will now <code>git pull</code> when you open the window and <code>git push</code> when you close it.</span>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-body">
+          <strong>Repeat on other Macs</strong>
+          <span>On any other Mac, clone the repo into the notes folder:</span>
+          <div class="code-block">mkdir -p ~/Library/Application\ Support/todizzy
+git clone https://github.com/YOUR_USERNAME/my-notes.git \
+  ~/Library/Application\ Support/todizzy/notes</div>
+          <span style="margin-top:6px;display:block;">Then enable Git sync in Settings on that machine too.</span>
+        </div>
+      </div>
+
+      <div class="gatekeeper-note">
+        <strong>Authentication:</strong> GitHub requires a personal access token (PAT) instead of a password for HTTPS pushes.
+        Generate one at <a href="https://github.com/settings/tokens" style="color:#c8aa60;">github.com/settings/tokens</a> with <code>repo</code> scope,
+        then use it as your password the first time git asks. macOS Keychain will save it for future pushes.
       </div>
     </div>
   </section>

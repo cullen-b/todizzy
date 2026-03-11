@@ -21,7 +21,7 @@ pub enum MotionMode {
 
 impl Default for MotionMode {
     fn default() -> Self {
-        Self::Vim
+        Self::None
     }
 }
 
@@ -60,14 +60,14 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            motion_mode: MotionMode::Vim,
+            motion_mode: MotionMode::None,
             close_on_focus_loss: true,
             font_size: 14.0,
             window_width: 360.0,
             window_height: 420.0,
-            show_nav_arrows: true,
+            show_nav_arrows: false,
             show_page_dots: true,
-            show_mode_indicator: true,
+            show_mode_indicator: false,
             git_sync: false,
         }
     }

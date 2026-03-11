@@ -27,7 +27,7 @@ impl MotionHandler for HelixHandler {
         match mode {
             Mode::Insert => handle_insert(key, actions),
             Mode::Normal | Mode::Visual { .. } => {
-                handle_normal(key, pending, actions)
+                handle_normal(key, mode, pending, actions)
             }
         }
     }
@@ -51,7 +51,7 @@ fn handle_insert(key: Key, actions: &mut Vec<EditorAction>) {
 
 // ── Normal / selection mode ───────────────────────────────────────────────────
 
-fn handle_normal(key: Key, pending: &mut VimPending, actions: &mut Vec<EditorAction>) {
+fn handle_normal(key: Key, mode: &Mode, pending: &mut VimPending, actions: &mut Vec<EditorAction>) {
     // Count accumulation
     if let Key::Char(c) = key {
         if c.is_ascii_digit() && (c != '0' || !pending.count_str.is_empty()) {
@@ -85,9 +85,27 @@ fn handle_normal(key: Key, pending: &mut VimPending, actions: &mut Vec<EditorAct
         Key::Char('k') | Key::Up => {
             actions.push(EditorAction::Move(Motion::Up(n)))
         }
-        Key::Char('w') => actions.push(EditorAction::MoveExtend(Motion::WordForward(n))),
-        Key::Char('b') => actions.push(EditorAction::MoveExtend(Motion::WordBackward(n))),
-        Key::Char('e') => actions.push(EditorAction::MoveExtend(Motion::WordEnd)),
+        Key::Char('w') => {
+            if matches!(mode, Mode::Visual { .. }) {
+                actions.push(EditorAction::MoveExtend(Motion::WordForward(n)));
+            } else {
+                actions.push(EditorAction::MoveSel(Motion::WordForward(n)));
+            }
+        }
+        Key::Char('b') => {
+            if matches!(mode, Mode::Visual { .. }) {
+                actions.push(EditorAction::MoveExtend(Motion::WordBackward(n)));
+            } else {
+                actions.push(EditorAction::MoveSel(Motion::WordBackward(n)));
+            }
+        }
+        Key::Char('e') => {
+            if matches!(mode, Mode::Visual { .. }) {
+                actions.push(EditorAction::MoveExtend(Motion::WordEnd));
+            } else {
+                actions.push(EditorAction::MoveSel(Motion::WordEnd));
+            }
+        }
         Key::Char('0') => actions.push(EditorAction::Move(Motion::LineStart)),
         Key::Char('$') => actions.push(EditorAction::Move(Motion::LineEnd)),
         Key::Char('G') => actions.push(EditorAction::Move(Motion::LastLine)),
@@ -133,6 +151,9 @@ fn handle_normal(key: Key, pending: &mut VimPending, actions: &mut Vec<EditorAct
 
         // ── Undo ─────────────────────────────────────────────────────────
         Key::Char('u') => actions.push(EditorAction::Undo),
+
+        // `;` collapses selection to cursor (no mode change needed, anchor resets)
+        Key::Char(';') => actions.push(EditorAction::SetMode(Mode::Normal)),
 
         Key::Escape => {
             actions.push(EditorAction::SetMode(Mode::Normal));

@@ -165,6 +165,7 @@ struct EditorViewIvars {
     swipe:               RefCell<SwipeDetector>,
     formatting:          Cell<bool>,
     last_escape_normal:  RefCell<Option<std::time::Instant>>,
+    base_font_size:      Cell<f64>,
 }
 
 declare_class!(
@@ -244,9 +245,20 @@ declare_class!(
                     let _: () = msg_send![color, set];
                     let _: () = msg_send![objc2::class!(NSBezierPath), fillRect: block];
                 } else {
-                    // Invalidate the full block area so the text beneath is
-                    // redrawn cleanly without the cursor ghost.
-                    let _: () = msg_send![self, setNeedsDisplayInRect: block];
+                    // Erase the block cursor by painting the text-background color
+                    // over the full block rect (not just the thin 1–2 px caret rect
+                    // that super would clear).  We do this directly in the drawing
+                    // pass rather than calling setNeedsDisplayInRect, which would
+                    // schedule an additional redraw pass on every blink-off cycle
+                    // and keep triggering drawInsertionPointInRect:turnedOn:false
+                    // in a tight loop.
+                    let bg = NSColor::textBackgroundColor();
+                    let _: () = msg_send![&*bg, set];
+                    let _: () = msg_send![objc2::class!(NSBezierPath), fillRect: block];
+                    // Let super handle any residual thin-caret state.
+                    let _: () = msg_send![super(self), drawInsertionPointInRect: rect
+                                                                          color: color
+                                                                       turnedOn: false];
                 }
             }
         }
@@ -261,6 +273,7 @@ impl EditorView {
             swipe:              RefCell::new(SwipeDetector::default()),
             formatting:         Cell::new(false),
             last_escape_normal: RefCell::new(None),
+            base_font_size:     Cell::new(14.0),
         };
         let this = mtm.alloc::<Self>().set_ivars(ivars);
         unsafe { msg_send_id![super(this), initWithFrame: frame] }
@@ -324,6 +337,14 @@ impl EditorView {
             }
             self.apply_nsview_cursor(cursor_utf16);
         }
+
+        // NSTextView silently updates typingAttributes whenever setSelectedRange
+        // is called (inside apply_nsview_cursor above), inheriting the attributes
+        // at the new cursor position.  If the cursor lands inside bold text (e.g.
+        // a `# heading`), the next typed character would inherit bold.  We reset
+        // typingAttributes unconditionally here so new text always uses the
+        // default style regardless of where the cursor was placed.
+        self.reset_typing_attributes();
 
         // Keep the mode indicator in sync after every key press.
         self.post_mode_notification();
@@ -428,7 +449,13 @@ impl EditorView {
         // highlight the full anchor→cursor selection.
         // We skip newlines: selecting '\n' makes NSTextView highlight the entire
         // line width, which looks wrong — fall back to thin insertion point instead.
-        let (loc, len): (usize, usize) = {
+        // `need_blink_restart` is true when we land on a newline/EOB in Normal mode
+        // and rely on drawInsertionPointInRect for the block cursor; we must restart
+        // NSTextView's blink timer so the method is actually called.
+        // need_restart: set when we use a zero-length selection (len=0) in Normal
+        // mode; NSTextView must be told to restart its blink timer so that
+        // drawInsertionPointInRect is called immediately.
+        let (loc, len, need_restart): (usize, usize, bool) = {
             let eng = self.ivars().engine.borrow();
             match eng.mode {
                 Mode::Normal => {
@@ -441,7 +468,6 @@ impl EditorView {
                         } else {
                             (cursor_byte, anchor)
                         };
-                        // Always show at least 1 char even on collapsed selection.
                         let hi_adj = if lo == hi {
                             text[lo..].chars().next()
                                 .map(|c| lo + c.len_utf8())
@@ -451,20 +477,52 @@ impl EditorView {
                         };
                         let lo_u16 = utf8_to_utf16(text, lo);
                         let hi_u16 = utf8_to_utf16(text, hi_adj);
-                        (lo_u16, hi_u16.saturating_sub(lo_u16))
+                        (lo_u16, hi_u16.saturating_sub(lo_u16), false)
                     } else {
-                        // Vim: 1-char block cursor, skip newlines.
+                        // Vim block cursor.
                         match text[cursor_byte..].chars().next() {
-                            Some(c) if c != '\n' => (utf16_pos, 1),
-                            _ => (utf16_pos, 0),
+                            Some(c) if c != '\n' => {
+                                // Normal character: 1-char selection = visible block.
+                                (utf16_pos, 1, false)
+                            }
+                            _ => {
+                                // At a newline or EOB: selecting '\n' with len=1
+                                // fills the entire line width in NSTextView.
+                                // Instead, step back to the previous non-newline
+                                // character on the same line to show a 1-char block
+                                // at the end of the line's text.
+                                // If the line is empty (or we're at byte 0), fall
+                                // back to a zero-length insertion point drawn by
+                                // drawInsertionPointInRect.
+                                let prev = text[..cursor_byte]
+                                    .char_indices()
+                                    .next_back();
+                                match prev {
+                                    Some((i, c)) if c != '\n' => {
+                                        // Show block on the last visible char of line.
+                                        (utf8_to_utf16(text, i), 1, false)
+                                    }
+                                    _ => {
+                                        // Empty line or start of buffer: insertion point.
+                                        (utf16_pos, 0, true)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-                _ => (utf16_pos, 0),
+                // Insert / Visual: thin blinking line cursor.
+                _ => (utf16_pos, 0, false),
             }
         };
         let range = NSRange { location: loc, length: len };
         unsafe { (self as &NSTextView).setSelectedRange(range) };
+        if need_restart {
+            unsafe {
+                let _: () = msg_send![self as &NSTextView,
+                    updateInsertionPointStateAndRestartTimer: true];
+            }
+        }
     }
 
     // ── Public interface used by AppDelegate ──────────────────────────────────
@@ -494,11 +552,21 @@ impl EditorView {
     }
 
     pub fn configure(&self, font_size: f64) {
+        self.ivars().base_font_size.set(font_size);
         unsafe {
             let tv = self as &NSTextView;
 
             let font = NSFont::monospacedSystemFontOfSize_weight(font_size, 0.0);
             let _: () = msg_send![tv, setFont: &*font];
+
+            // Blue insertion-point color so the block cursor is visible at
+            // newlines and EOB in Normal mode (where drawInsertionPointInRect
+            // draws a filled rect using this color).
+            let blue: Retained<AnyObject> = msg_send_id![
+                objc2::class!(NSColor),
+                colorWithRed: 0.29f64 green: 0.56f64 blue: 0.96f64 alpha: 0.85f64
+            ];
+            let _: () = msg_send![tv, setInsertionPointColor: &*blue];
 
             let _: () = msg_send![tv, setBackgroundColor: &*NSColor::textBackgroundColor()];
             let _: () = msg_send![tv, setTextColor: &*NSColor::textColor()];
@@ -520,7 +588,7 @@ impl EditorView {
     }
 
     fn apply_markdown_formatting(&self) {
-        // Guard against re-entrant calls.
+        // Guard against re-entrant calls (setAttributes: can trigger didChangeText).
         if self.ivars().formatting.get() { return; }
         self.ivars().formatting.set(true);
 
@@ -530,17 +598,9 @@ impl EditorView {
             return;
         }
 
-        let spans = markdown_spans(&text);
-
         unsafe {
             let ts: *mut AnyObject = msg_send![self as &NSTextView, textStorage];
             if ts.is_null() {
-                self.ivars().formatting.set(false);
-                return;
-            }
-
-            let full_u16 = utf8_to_utf16(&text, text.len());
-            if full_u16 == 0 {
                 self.ivars().formatting.set(false);
                 return;
             }
@@ -558,29 +618,13 @@ impl EditorView {
 
             let _: () = msg_send![ts, beginEditing];
 
-            // Determine the current font size from the text view.
-            let font_pt: f64 = {
-                let f: *mut AnyObject = msg_send![self as &NSTextView, font];
-                if !f.is_null() { msg_send![f, pointSize] } else { 14.0 }
-            };
+            let font_pt: f64 = self.ivars().base_font_size.get();
 
-            // Build default attribute dict: resets all spans on re-format.
-            let def_font  = NSFont::monospacedSystemFontOfSize_weight(font_pt, 0.0);
-            let def_color = NSColor::textColor();
-            let num_zero: Retained<AnyObject>  = msg_send_id![objc2::class!(NSNumber), numberWithInt: 0i32];
-            let flt_zero: Retained<AnyObject>  = msg_send_id![objc2::class!(NSNumber), numberWithDouble: 0.0f64];
-            let def_dict: Retained<AnyObject>  = msg_send_id![objc2::class!(NSMutableDictionary), new];
-            let _: () = msg_send![&*def_dict, setObject: &*def_font  forKey: ns_string!("NSFont")];
-            let _: () = msg_send![&*def_dict, setObject: &*def_color forKey: ns_string!("NSColor")];
-            let _: () = msg_send![&*def_dict, setObject: &*num_zero  forKey: ns_string!("NSStrikethrough")];
-            let _: () = msg_send![&*def_dict, setObject: &*flt_zero  forKey: ns_string!("NSObliqueness")];
-
-            let full_range = NSRange { location: 0, length: full_u16 };
-            let _: () = msg_send![ts, setAttributes: &*def_dict range: full_range];
-
-            // Pre-build span resources.
-            let bold_font = NSFont::monospacedSystemFontOfSize_weight(font_pt, 0.5);
-            let h1_font   = NSFont::monospacedSystemFontOfSize_weight(font_pt + 2.0, 0.5);
+            // Pre-build all attribute objects once.
+            let def_font   = NSFont::monospacedSystemFontOfSize_weight(font_pt, 0.0);
+            let bold_font  = NSFont::monospacedSystemFontOfSize_weight(font_pt, 0.5);
+            let h1_font    = NSFont::monospacedSystemFontOfSize_weight(font_pt + 2.0, 0.5);
+            let def_color  = NSColor::textColor();
             let gray: Retained<AnyObject> = msg_send_id![
                 objc2::class!(NSColor),
                 colorWithRed: 0.50f64 green: 0.50f64 blue: 0.50f64 alpha: 1.0f64
@@ -589,37 +633,130 @@ impl EditorView {
                 objc2::class!(NSColor),
                 colorWithRed: 0.10f64 green: 0.60f64 blue: 0.60f64 alpha: 1.0f64
             ];
-            let num_strike: Retained<AnyObject> = msg_send_id![objc2::class!(NSNumber), numberWithInt: 1i32];
-            let num_italic: Retained<AnyObject> = msg_send_id![objc2::class!(NSNumber), numberWithDouble: 0.20f64];
+            let num_zero:   Retained<AnyObject> = msg_send_id![objc2::class!(NSNumber), numberWithInt: 0i32];
+            let num_one:    Retained<AnyObject> = msg_send_id![objc2::class!(NSNumber), numberWithInt: 1i32];
+            let flt_zero:   Retained<AnyObject> = msg_send_id![objc2::class!(NSNumber), numberWithDouble: 0.0f64];
+            let flt_italic: Retained<AnyObject> = msg_send_id![objc2::class!(NSNumber), numberWithDouble: 0.20f64];
 
-            for span in &spans {
-                let lo = utf8_to_utf16(&text, span.start);
-                let hi = utf8_to_utf16(&text, span.end);
-                if hi <= lo { continue; }
-                let r = NSRange { location: lo, length: hi - lo };
-                match span.kind {
-                    MdSpanKind::H1 => {
-                        let _: () = msg_send![ts, addAttribute: ns_string!("NSFont") value: &*h1_font range: r];
-                    }
-                    MdSpanKind::Bold => {
-                        let _: () = msg_send![ts, addAttribute: ns_string!("NSFont") value: &*bold_font range: r];
-                    }
-                    MdSpanKind::Italic => {
-                        let _: () = msg_send![ts, addAttribute: ns_string!("NSObliqueness") value: &*num_italic range: r];
-                    }
-                    MdSpanKind::Code => {
-                        let _: () = msg_send![ts, addAttribute: ns_string!("NSColor") value: &*teal range: r];
-                    }
-                    MdSpanKind::Strike => {
-                        let _: () = msg_send![ts, addAttribute: ns_string!("NSStrikethrough") value: &*num_strike range: r];
-                    }
-                    MdSpanKind::Quote => {
-                        let _: () = msg_send![ts, addAttribute: ns_string!("NSColor") value: &*gray range: r];
+            // Default dict used to reset each line before applying its own formatting.
+            let def_dict: Retained<AnyObject> = msg_send_id![objc2::class!(NSMutableDictionary), new];
+            let _: () = msg_send![&*def_dict, setObject: &*def_font  forKey: ns_string!("NSFont")];
+            let _: () = msg_send![&*def_dict, setObject: &*def_color forKey: ns_string!("NSColor")];
+            let _: () = msg_send![&*def_dict, setObject: &*num_zero  forKey: ns_string!("NSStrikethrough")];
+            let _: () = msg_send![&*def_dict, setObject: &*flt_zero  forKey: ns_string!("NSObliqueness")];
+
+            // ── Per-line formatting ───────────────────────────────────────────
+            // Process the text one line at a time.  Each line is first reset to
+            // the default attrs, then the line-level pattern is applied, then
+            // inline spans are applied — all strictly within that line's range.
+            // This guarantees no formatting leaks from one line to another.
+            let bytes = text.as_bytes();
+            let len   = bytes.len();
+            let mut pos = 0usize;
+
+            while pos <= len {
+                // Find end of this line (position of '\n', or EOF).
+                let line_end = bytes[pos..].iter()
+                    .position(|&b| b == b'\n')
+                    .map(|i| pos + i)
+                    .unwrap_or(len);
+
+                // Range covers the line text + the trailing '\n' (if present)
+                // so the newline character also gets the default attrs.
+                let range_end = if line_end < len { line_end + 1 } else { line_end };
+                if range_end > pos {
+                    let lo_u16 = utf8_to_utf16(&text, pos);
+                    let hi_u16 = utf8_to_utf16(&text, range_end);
+                    if hi_u16 > lo_u16 {
+                        // Reset this line to default attributes.
+                        let line_range = NSRange { location: lo_u16, length: hi_u16 - lo_u16 };
+                        let _: () = msg_send![ts, setAttributes: &*def_dict range: line_range];
+
+                        // ── Line-level pattern ───────────────────────────────
+                        if line_end > pos {
+                            let line_lo = utf8_to_utf16(&text, pos);
+                            let line_hi = utf8_to_utf16(&text, line_end);
+                            let lr = NSRange { location: line_lo, length: line_hi - line_lo };
+                            if bytes[pos] == b'#' {
+                                let font = if pos + 1 < len && bytes[pos + 1] == b' ' {
+                                    &*h1_font  // `# Heading` → larger + bold
+                                } else {
+                                    &*bold_font // `#nospace` → just bold
+                                };
+                                let _: () = msg_send![ts, addAttribute: ns_string!("NSFont") value: font range: lr];
+                            } else if bytes[pos] == b'=' {
+                                let _: () = msg_send![ts, addAttribute: ns_string!("NSFont") value: &*bold_font range: lr];
+                            } else if bytes[pos] == b'>' {
+                                let _: () = msg_send![ts, addAttribute: ns_string!("NSColor") value: &*gray range: lr];
+                            }
+
+                            // ── Inline patterns (constrained to this line) ───
+                            let mut i = pos;
+                            while i < line_end {
+                                if i + 1 < line_end && bytes[i] == b'*' && bytes[i+1] == b'*' {
+                                    // **bold** — search for closing ** within line only
+                                    if let Some(close) = find_marker_in(&bytes[i+2..line_end], b"**") {
+                                        let close = i + 2 + close;
+                                        let slo = utf8_to_utf16(&text, i);
+                                        let shi = utf8_to_utf16(&text, close + 2);
+                                        let sr = NSRange { location: slo, length: shi - slo };
+                                        let _: () = msg_send![ts, addAttribute: ns_string!("NSFont") value: &*bold_font range: sr];
+                                        i = close + 2;
+                                        continue;
+                                    }
+                                }
+                                if bytes[i] == b'*' && (i + 1 >= line_end || bytes[i+1] != b'*') {
+                                    // *italic* — search within line
+                                    if let Some(close) = find_byte_in(&bytes[i+1..line_end], b'*') {
+                                        let close = i + 1 + close;
+                                        let slo = utf8_to_utf16(&text, i);
+                                        let shi = utf8_to_utf16(&text, close + 1);
+                                        let sr = NSRange { location: slo, length: shi - slo };
+                                        let _: () = msg_send![ts, addAttribute: ns_string!("NSObliqueness") value: &*flt_italic range: sr];
+                                        i = close + 1;
+                                        continue;
+                                    }
+                                }
+                                if bytes[i] == b'`' {
+                                    // `code` — search within line
+                                    if let Some(close) = find_byte_in(&bytes[i+1..line_end], b'`') {
+                                        let close = i + 1 + close;
+                                        let slo = utf8_to_utf16(&text, i);
+                                        let shi = utf8_to_utf16(&text, close + 1);
+                                        let sr = NSRange { location: slo, length: shi - slo };
+                                        let _: () = msg_send![ts, addAttribute: ns_string!("NSColor") value: &*teal range: sr];
+                                        i = close + 1;
+                                        continue;
+                                    }
+                                }
+                                if i + 1 < line_end && bytes[i] == b'~' && bytes[i+1] == b'~' {
+                                    // ~~strike~~ — search within line
+                                    if let Some(close) = find_marker_in(&bytes[i+2..line_end], b"~~") {
+                                        let close = i + 2 + close;
+                                        let slo = utf8_to_utf16(&text, i);
+                                        let shi = utf8_to_utf16(&text, close + 2);
+                                        let sr = NSRange { location: slo, length: shi - slo };
+                                        let _: () = msg_send![ts, addAttribute: ns_string!("NSStrikethrough") value: &*num_one range: sr];
+                                        i = close + 2;
+                                        continue;
+                                    }
+                                }
+                                // Advance past the current multi-byte char safely.
+                                i += text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                            }
+                        }
                     }
                 }
+
+                if line_end >= len { break; }
+                pos = line_end + 1;
             }
 
             let _: () = msg_send![ts, endEditing];
+
+            // Reset typing attributes so the next keystroke doesn't inherit
+            // any formatted line's attributes (e.g. bold after a # heading).
+            let _: () = msg_send![self as &NSTextView, setTypingAttributes: &*def_dict];
 
             if !undo.is_null() {
                 let _: () = msg_send![undo, enableUndoRegistration];
@@ -627,6 +764,32 @@ impl EditorView {
         }
 
         self.ivars().formatting.set(false);
+    }
+
+    /// Build and apply the default text attributes as typingAttributes.
+    ///
+    /// NSTextView automatically overrides typingAttributes whenever the
+    /// selection changes (setSelectedRange:), inheriting the attributes of the
+    /// character at the new cursor position.  Calling this method after any
+    /// cursor movement ensures that the next typed character always uses the
+    /// plain default style, regardless of what formatting sits at the cursor.
+    fn reset_typing_attributes(&self) {
+        let font_pt = self.ivars().base_font_size.get();
+        unsafe {
+            let def_font  = NSFont::monospacedSystemFontOfSize_weight(font_pt, 0.0);
+            let def_color = NSColor::textColor();
+            let num_zero: Retained<AnyObject> =
+                msg_send_id![objc2::class!(NSNumber), numberWithInt: 0i32];
+            let flt_zero: Retained<AnyObject> =
+                msg_send_id![objc2::class!(NSNumber), numberWithDouble: 0.0f64];
+            let dict: Retained<AnyObject> =
+                msg_send_id![objc2::class!(NSMutableDictionary), new];
+            let _: () = msg_send![&*dict, setObject: &*def_font  forKey: ns_string!("NSFont")];
+            let _: () = msg_send![&*dict, setObject: &*def_color forKey: ns_string!("NSColor")];
+            let _: () = msg_send![&*dict, setObject: &*num_zero  forKey: ns_string!("NSStrikethrough")];
+            let _: () = msg_send![&*dict, setObject: &*flt_zero  forKey: ns_string!("NSObliqueness")];
+            let _: () = msg_send![self as &NSTextView, setTypingAttributes: &*dict];
+        }
     }
 }
 
@@ -1182,13 +1345,25 @@ impl AppDelegate {
         // Show immediately with current local content — no blocking.
         self.load_current_note();
 
-        // Restore previous position if the user dragged the window; otherwise
-        // default to below the status bar icon (first open).
+        // Restore previous position if the user dragged the window AND the saved
+        // position is on the same screen as the status bar button. Otherwise
+        // default to below the status bar icon (first open, or screen switch).
         {
             let saved = *self.ivars().saved_window_origin.borrow();
-            if let Some(origin) = saved {
-                if let Some(panel) = self.ivars().panel.borrow().as_ref() {
-                    unsafe { let _: () = msg_send![&**panel, setFrameOrigin: origin]; }
+            let sb_screen = self.status_bar_screen_frame();
+            let use_saved = saved.map_or(false, |origin| {
+                sb_screen.map_or(true, |sf| {
+                    origin.x >= sf.origin.x
+                        && origin.x < sf.origin.x + sf.size.width
+                        && origin.y >= sf.origin.y
+                        && origin.y < sf.origin.y + sf.size.height
+                })
+            });
+            if use_saved {
+                if let Some(origin) = saved {
+                    if let Some(panel) = self.ivars().panel.borrow().as_ref() {
+                        unsafe { let _: () = msg_send![&**panel, setFrameOrigin: origin]; }
+                    }
                 }
             } else {
                 self.position_window_below_status_bar();
@@ -1281,6 +1456,24 @@ impl AppDelegate {
             unsafe {
                 let _: () = msg_send![&**panel, setFrameOrigin: window_origin];
             }
+        }
+    }
+
+    /// Returns the frame (in screen coordinates) of the screen that contains
+    /// the status bar button. Used to decide whether a saved window origin is
+    /// still valid for the current status bar screen.
+    fn status_bar_screen_frame(&self) -> Option<NSRect> {
+        let item_ref = self.ivars().status_item.borrow();
+        let item = item_ref.as_ref()?;
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+        let button = unsafe { item.button(mtm) }?;
+        unsafe {
+            let win: *mut AnyObject = msg_send![&*button, window];
+            if win.is_null() { return None; }
+            let screen: *mut AnyObject = msg_send![win, screen];
+            if screen.is_null() { return None; }
+            let frame: NSRect = msg_send![screen, frame];
+            Some(frame)
         }
     }
 
@@ -1694,115 +1887,22 @@ fn make_label(mtm: MainThreadMarker, text: &str, rect: NSRect) -> Retained<NSTex
     field
 }
 
-// ── Markdown span scanner ─────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy)]
-enum MdSpanKind {
-    H1,     // `# heading` — bold + larger font
-    Bold,   // `= line` or `**text**`
-    Italic, // `*text*`
-    Code,   // `` `text` ``
-    Strike, // `~~text~~`
-    Quote,  // `> text` — gray
-}
-
-struct MdSpan {
-    start: usize,
-    end:   usize,
-    kind:  MdSpanKind,
-}
-
-fn markdown_spans(text: &str) -> Vec<MdSpan> {
-    let mut spans = Vec::new();
-    let bytes = text.as_bytes();
-    let len   = bytes.len();
-
-    // ── Line-level patterns ───────────────────────────────────────────────────
-    let mut pos = 0usize;
-    while pos < len {
-        let line_end = bytes[pos..]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map(|i| pos + i)
-            .unwrap_or(len);
-
-        if line_end > pos {
-            let ls = pos;
-            let le = line_end;
-            if bytes[ls] == b'#' {
-                if ls + 1 < len && bytes[ls + 1] == b' ' {
-                    spans.push(MdSpan { start: ls, end: le, kind: MdSpanKind::H1 });
-                } else {
-                    spans.push(MdSpan { start: ls, end: le, kind: MdSpanKind::Bold });
-                }
-            } else if bytes[ls] == b'=' {
-                spans.push(MdSpan { start: ls, end: le, kind: MdSpanKind::Bold });
-            } else if bytes[ls] == b'>' {
-                spans.push(MdSpan { start: ls, end: le, kind: MdSpanKind::Quote });
-            }
-        }
-        pos = line_end + 1;
-    }
-
-    // ── Inline patterns ───────────────────────────────────────────────────────
-    let mut i = 0usize;
-    while i < len {
-        // **bold**  (check before single *)
-        if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'*' {
-            if let Some(close) = find_marker(bytes, i + 2, b"**") {
-                spans.push(MdSpan { start: i, end: close + 2, kind: MdSpanKind::Bold });
-                i = close + 2;
-                continue;
-            }
-        }
-        // *italic*  (not **)
-        if bytes[i] == b'*' && (i + 1 >= len || bytes[i + 1] != b'*') {
-            if let Some(close) = find_same_line(bytes, i + 1, b'*') {
-                spans.push(MdSpan { start: i, end: close + 1, kind: MdSpanKind::Italic });
-                i = close + 1;
-                continue;
-            }
-        }
-        // `code`
-        if bytes[i] == b'`' {
-            if let Some(close) = find_same_line(bytes, i + 1, b'`') {
-                spans.push(MdSpan { start: i, end: close + 1, kind: MdSpanKind::Code });
-                i = close + 1;
-                continue;
-            }
-        }
-        // ~~strike~~
-        if i + 1 < len && bytes[i] == b'~' && bytes[i + 1] == b'~' {
-            if let Some(close) = find_marker(bytes, i + 2, b"~~") {
-                spans.push(MdSpan { start: i, end: close + 2, kind: MdSpanKind::Strike });
-                i = close + 2;
-                continue;
-            }
-        }
-        i += 1;
-    }
-
-    spans
-}
-
-fn find_marker(bytes: &[u8], from: usize, marker: &[u8]) -> Option<usize> {
+/// Find `marker` within `slice`, returning the offset into `slice` (not the
+/// original buffer).  Used for per-line inline span scanning.
+fn find_marker_in(slice: &[u8], marker: &[u8]) -> Option<usize> {
     let mlen = marker.len();
-    let mut i = from;
-    while i + mlen <= bytes.len() {
-        if &bytes[i..i + mlen] == marker { return Some(i); }
+    let mut i = 0;
+    while i + mlen <= slice.len() {
+        if &slice[i..i + mlen] == marker { return Some(i); }
         i += 1;
     }
     None
 }
 
-fn find_same_line(bytes: &[u8], from: usize, ch: u8) -> Option<usize> {
-    let mut i = from;
-    while i < bytes.len() {
-        if bytes[i] == b'\n' { return None; }
-        if bytes[i] == ch   { return Some(i); }
-        i += 1;
-    }
-    None
+/// Find a single byte within `slice`, returning its offset into `slice`.
+fn find_byte_in(slice: &[u8], ch: u8) -> Option<usize> {
+    slice.iter().position(|&b| b == ch)
 }
 
 // ── Key-event translation ─────────────────────────────────────────────────────
