@@ -290,6 +290,13 @@ impl EditorView {
             }
         };
 
+        // Sync the engine cursor from NSTextView's actual selection before
+        // processing the key.  If the user repositioned the cursor with a
+        // mouse click, NSTextView already moved its insertion point but the
+        // engine still holds the old position.  Without this sync, pressing
+        // `i` (or any key) would snap the cursor back to the pre-click spot.
+        self.sync_cursor_from_nsview();
+
         let in_insert = {
             let eng = self.ivars().engine.borrow();
             eng.mode == Mode::Insert && key != Key::Escape
@@ -329,9 +336,10 @@ impl EditorView {
 
             if content_changed {
                 self.apply_nsview_string(&new_content);
-                // setString: fires didChangeText → sync_buffer_from_nsview, which
-                // reads NSTextView's selection (reset to 0 by setString:) and sets
-                // eng.buf.cursor = 0.  Restore the position the engine computed.
+                // setString: (inside apply_nsview_string) fires didChangeText →
+                // sync_buffer_from_nsview, which reads NSTextView's selection
+                // (reset to 0 by setString:) and sets eng.buf.cursor = 0.
+                // Restore the cursor position the engine computed.
                 let byte_pos = utf16_to_utf8(&new_content, cursor_utf16);
                 self.ivars().engine.borrow_mut().buf.set_cursor(byte_pos);
             }
@@ -419,6 +427,23 @@ impl EditorView {
 
     // ── NSTextView ↔ Buffer sync ──────────────────────────────────────────────
 
+    /// Update the engine cursor (and Helix anchor) from NSTextView's current
+    /// selectedRange.  Called before every key event so mouse clicks are
+    /// reflected in the engine before the next keystroke is processed.
+    fn sync_cursor_from_nsview(&self) {
+        let range: NSRange = unsafe {
+            (self as &NSTextView as &NSText).selectedRange()
+        };
+        let mut eng = self.ivars().engine.borrow_mut();
+        let cursor = utf16_to_utf8(eng.buf.as_str(), range.location);
+        eng.buf.set_cursor(cursor);
+        // Collapse the Helix anchor to the new position so a click always
+        // starts a fresh selection rather than extending the old one.
+        if eng.selection_anchor.is_some() {
+            eng.selection_anchor = Some(cursor);
+        }
+    }
+
     fn sync_buffer_from_nsview(&self) {
         let content: String = unsafe {
             let tv = self as &NSTextView;
@@ -437,10 +462,31 @@ impl EditorView {
     }
 
     fn apply_nsview_string(&self, text: &str) {
-        let ns = NSString::from_str(text);
+        // setString: resets the NSScrollView to the top on every call.
+        // For in-place edits (typing, deletions) this causes the view to jump away
+        // from where the user is working.  Save the clip-view scroll origin before
+        // the call and restore it afterwards so the visible region stays put.
+        // load_content calls scrollRangeToVisible explicitly when it needs top-scroll.
         unsafe {
-            let t = self as &NSTextView as &NSText;
-            t.setString(&ns);
+            let sv: *mut AnyObject = msg_send![self as &NSView, enclosingScrollView];
+            let saved: NSPoint = if sv.is_null() {
+                NSPoint::new(0.0, 0.0)
+            } else {
+                let cv: *mut AnyObject = msg_send![sv, contentView];
+                let b: NSRect = msg_send![cv, bounds];
+                b.origin
+            };
+
+            let ns = NSString::from_str(text);
+            (self as &NSTextView as &NSText).setString(&ns);
+
+            // Restore — also runs after didChangeText / apply_markdown_formatting
+            // which are fired synchronously inside setString:.
+            if !sv.is_null() {
+                let cv: *mut AnyObject = msg_send![sv, contentView];
+                let _: () = msg_send![cv, scrollToPoint: saved];
+                let _: () = msg_send![sv, reflectScrolledClipView: cv];
+            }
         }
     }
 
@@ -522,8 +568,12 @@ impl EditorView {
             eng.set_content(text.to_owned());
         }
         self.apply_nsview_string(text);
-        // apply_nsview_cursor reads the engine mode, so the block-cursor
-        // selection is set correctly even on initial load.
+        // apply_nsview_string now preserves scroll position; for a fresh note
+        // load we always want to start at the top.
+        unsafe {
+            let _: () = msg_send![self as &NSTextView,
+                scrollRangeToVisible: NSRange { location: 0, length: 0 }];
+        }
         self.apply_nsview_cursor(0);
         self.apply_markdown_formatting();
     }
