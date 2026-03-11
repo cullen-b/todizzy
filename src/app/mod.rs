@@ -203,8 +203,8 @@ declare_class!(
             self.on_text_changed();
         }
 
-        /// Draw a block-shaped cursor in Normal mode; fall back to the default
-        /// thin insertion point in Insert / Visual mode.
+        /// Draw a block-shaped cursor in Vim/Helix Normal mode; fall back to the
+        /// default thin blinking insertion point in Insert, Visual, and None mode.
         #[method(drawInsertionPointInRect:color:turnedOn:)]
         fn draw_insertion_point_in_rect(
             &self,
@@ -214,7 +214,7 @@ declare_class!(
         ) {
             let is_normal = {
                 let eng = self.ivars().engine.borrow();
-                eng.mode == Mode::Normal
+                eng.mode == Mode::Normal && eng.motion_mode() != MotionMode::None
             };
 
             if !is_normal {
@@ -445,73 +445,62 @@ impl EditorView {
     }
 
     fn apply_nsview_cursor(&self, utf16_pos: usize) {
-        // In Normal mode show a block cursor (1-char selection) or, in Helix mode,
-        // highlight the full anchor→cursor selection.
-        // We skip newlines: selecting '\n' makes NSTextView highlight the entire
-        // line width, which looks wrong — fall back to thin insertion point instead.
-        // `need_blink_restart` is true when we land on a newline/EOB in Normal mode
-        // and rely on drawInsertionPointInRect for the block cursor; we must restart
-        // NSTextView's blink timer so the method is actually called.
-        // need_restart: set when we use a zero-length selection (len=0) in Normal
-        // mode; NSTextView must be told to restart its blink timer so that
-        // drawInsertionPointInRect is called immediately.
+        // Cursor rendering strategy:
+        //   • Vim/Helix Normal (non-selection): len=0, drawInsertionPointInRect draws
+        //     a full block. NSTextView automatically blinks it via turned_on:true/false.
+        //   • Helix Normal with real selection: len>0 range highlight.
+        //   • Insert / Visual / None: len=0, super draws the standard blinking thin line.
+        //
+        // Using len=0 for Vim Normal (instead of a 1-char selection) means the cursor
+        // is drawn entirely by drawInsertionPointInRect, giving a crisp opaque block
+        // that blinks identically to the insertion-point timer, with no need to
+        // step back one char at newlines / EOB.
         let (loc, len, need_restart): (usize, usize, bool) = {
             let eng = self.ivars().engine.borrow();
+
+            // None mode: plain thin blinking line (super handles everything).
+            if eng.motion_mode() == MotionMode::None {
+                return {
+                    let range = NSRange { location: utf16_pos, length: 0 };
+                    unsafe { (self as &NSTextView).setSelectedRange(range) };
+                    // Restart blink timer so the cursor appears immediately.
+                    unsafe {
+                        let _: () = msg_send![self as &NSTextView,
+                            updateInsertionPointStateAndRestartTimer: true];
+                    }
+                };
+            }
+
             match eng.mode {
                 Mode::Normal => {
                     let text = eng.buf.as_str();
                     let cursor_byte = utf16_to_utf8(text, utf16_pos);
+
                     if eng.motion_mode() == MotionMode::Helix {
                         let anchor = eng.selection_anchor.unwrap_or(cursor_byte);
-                        let (lo, hi) = if anchor <= cursor_byte {
-                            (anchor, cursor_byte)
+                        if anchor != cursor_byte {
+                            // Non-collapsed Helix selection: range highlight.
+                            let (lo, hi) = if anchor <= cursor_byte {
+                                (anchor, cursor_byte)
+                            } else {
+                                (cursor_byte, anchor)
+                            };
+                            let hi_adj = text[hi..].chars().next()
+                                .map(|c| hi + c.len_utf8())
+                                .unwrap_or(hi);
+                            let lo_u16 = utf8_to_utf16(text, lo);
+                            let hi_u16 = utf8_to_utf16(text, hi_adj);
+                            (lo_u16, hi_u16.saturating_sub(lo_u16), false)
                         } else {
-                            (cursor_byte, anchor)
-                        };
-                        let hi_adj = if lo == hi {
-                            text[lo..].chars().next()
-                                .map(|c| lo + c.len_utf8())
-                                .unwrap_or(lo)
-                        } else {
-                            hi
-                        };
-                        let lo_u16 = utf8_to_utf16(text, lo);
-                        let hi_u16 = utf8_to_utf16(text, hi_adj);
-                        (lo_u16, hi_u16.saturating_sub(lo_u16), false)
-                    } else {
-                        // Vim block cursor.
-                        match text[cursor_byte..].chars().next() {
-                            Some(c) if c != '\n' => {
-                                // Normal character: 1-char selection = visible block.
-                                (utf16_pos, 1, false)
-                            }
-                            _ => {
-                                // At a newline or EOB: selecting '\n' with len=1
-                                // fills the entire line width in NSTextView.
-                                // Instead, step back to the previous non-newline
-                                // character on the same line to show a 1-char block
-                                // at the end of the line's text.
-                                // If the line is empty (or we're at byte 0), fall
-                                // back to a zero-length insertion point drawn by
-                                // drawInsertionPointInRect.
-                                let prev = text[..cursor_byte]
-                                    .char_indices()
-                                    .next_back();
-                                match prev {
-                                    Some((i, c)) if c != '\n' => {
-                                        // Show block on the last visible char of line.
-                                        (utf8_to_utf16(text, i), 1, false)
-                                    }
-                                    _ => {
-                                        // Empty line or start of buffer: insertion point.
-                                        (utf16_pos, 0, true)
-                                    }
-                                }
-                            }
+                            // Collapsed Helix selection: block cursor via drawInsertionPointInRect.
+                            (utf16_pos, 0, true)
                         }
+                    } else {
+                        // Vim Normal: block cursor via drawInsertionPointInRect (blinks automatically).
+                        (utf16_pos, 0, true)
                     }
                 }
-                // Insert / Visual: thin blinking line cursor.
+                // Insert / Visual: thin blinking line.
                 _ => (utf16_pos, 0, false),
             }
         };
