@@ -25,6 +25,24 @@ impl Default for MotionMode {
     }
 }
 
+/// What mode the editor starts in each time the window opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StartupMode {
+    /// Always open in Normal mode.
+    Normal,
+    /// Always open in Insert mode.
+    Insert,
+    /// Remember the mode the editor was in when the window was last closed.
+    Persist,
+}
+
+impl Default for StartupMode {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -55,6 +73,13 @@ pub struct Settings {
     /// Automatically `git pull` on open and `git push` on close.
     /// Requires the user to have initialised a git repo in the notes directory.
     pub git_sync: bool,
+
+    /// Which mode to restore when the window opens.
+    pub startup_mode: StartupMode,
+
+    /// Saved modal mode for `StartupMode::Persist` (true = Insert, false = Normal).
+    /// Updated on every hide/quit.
+    pub persisted_in_insert: bool,
 }
 
 impl Default for Settings {
@@ -69,6 +94,8 @@ impl Default for Settings {
             show_page_dots: true,
             show_mode_indicator: false,
             git_sync: false,
+            startup_mode: StartupMode::Normal,
+            persisted_in_insert: false,
         }
     }
 }

@@ -30,10 +30,10 @@ use objc2::{
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
     NSAutoresizingMaskOptions, NSBackingStoreType, NSButton,
-    NSColor, NSEvent, NSEventMask, NSEventPhase, NSFont, NSMenu, NSMenuItem,
-    NSPanel, NSScrollView, NSSegmentedControl, NSStatusBar, NSStatusItem,
-    NSText, NSTextField, NSTextView, NSView, NSWindow, NSWindowButton,
-    NSWindowDelegate, NSWindowStyleMask,
+    NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSEventPhase, NSFont,
+    NSMenu, NSMenuItem, NSPanel, NSScrollView, NSSegmentedControl, NSStatusBar,
+    NSStatusItem, NSText, NSTextField, NSTextView, NSView, NSWindow,
+    NSWindowButton, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSNotification, NSNotificationCenter,
@@ -44,7 +44,7 @@ use objc2_foundation::{
 use crate::{
     editor::{EditorEngine, Key, Mode},
     gestures::{SwipeDetector, SwipeDir, SwipeOutcome},
-    settings::{MotionMode, Settings},
+    settings::{MotionMode, Settings, StartupMode},
     storage::NoteStore,
 };
 
@@ -190,6 +190,26 @@ declare_class!(
             self.handle_key_event(event);
         }
 
+        /// Handle Cmd+C/V/X/A so clipboard works even without a standard Edit menu.
+        /// NSTextView's copy:/paste:/cut:/selectAll: implement the actual operations;
+        /// we just need to route the key equivalents to them.
+        #[method(performKeyEquivalent:)]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            let flags = unsafe { event.modifierFlags() };
+            if !flags.contains(NSEventModifierFlags::NSEventModifierFlagCommand) {
+                return unsafe { msg_send![super(self), performKeyEquivalent: event] };
+            }
+            let nil: *mut AnyObject = std::ptr::null_mut();
+            match unsafe { event.keyCode() } {
+                8 => { unsafe { let _: () = msg_send![self, copy: nil]; }      true } // c
+                9 => { unsafe { let _: () = msg_send![self, paste: nil]; }     true } // v
+                7 => { unsafe { let _: () = msg_send![self, cut: nil]; }       true } // x
+                0 => { unsafe { let _: () = msg_send![self, selectAll: nil]; } true } // a
+                6 => { unsafe { let _: () = msg_send![self, undo: nil]; }      true } // z
+                _ => unsafe { msg_send![super(self), performKeyEquivalent: event] },
+            }
+        }
+
         /// Intercept scroll wheel for note-page swiping.
         #[method(scrollWheel:)]
         fn scroll_wheel(&self, event: &NSEvent) {
@@ -296,6 +316,19 @@ impl EditorView {
         // engine still holds the old position.  Without this sync, pressing
         // `i` (or any key) would snap the cursor back to the pre-click spot.
         self.sync_cursor_from_nsview();
+
+        // Shift+H / Shift+L in Normal mode → navigate pages (previous / next).
+        if matches!(key, Key::Char('H') | Key::Char('L')) {
+            let in_normal = {
+                let eng = self.ivars().engine.borrow();
+                eng.mode == Mode::Normal && eng.motion_mode() != MotionMode::None
+            };
+            if in_normal {
+                let dir = if key == Key::Char('H') { SwipeDir::Right } else { SwipeDir::Left };
+                self.post_swipe_notification(dir);
+                return;
+            }
+        }
 
         let in_insert = {
             let eng = self.ivars().engine.borrow();
@@ -588,6 +621,23 @@ impl EditorView {
 
     pub fn set_motion_mode(&self, mode: MotionMode) {
         self.ivars().engine.borrow_mut().set_motion_mode(mode);
+    }
+
+    /// Switch to Insert mode after a note load (used by startup-mode setting).
+    /// No-op in None motion mode since there is no modal layer.
+    pub fn set_initial_mode_insert(&self) {
+        {
+            let mut eng = self.ivars().engine.borrow_mut();
+            if eng.motion_mode() == MotionMode::None { return; }
+            eng.mode = Mode::Insert;
+            eng.selection_anchor = None;
+        }
+        let cursor_utf16 = {
+            let eng = self.ivars().engine.borrow();
+            utf8_to_utf16(eng.buf.as_str(), eng.buf.cursor())
+        };
+        self.apply_nsview_cursor(cursor_utf16);
+        self.post_mode_notification();
     }
 
     pub fn configure(&self, font_size: f64) {
@@ -885,6 +935,7 @@ declare_class!(
 
         #[method(applicationWillTerminate:)]
         fn app_will_terminate(&self, _notif: &NSNotification) {
+            self.save_persisted_mode();
             self.save_current_note();
             self.git_push();
         }
@@ -1463,6 +1514,7 @@ impl AppDelegate {
                 let _: () = msg_send![&**panel, orderOut: null];
             }
         }
+        self.save_persisted_mode();
         // Save the note synchronously (fast, local disk), then push in background.
         self.save_current_note();
         let git_sync = self.ivars().core.borrow().settings.git_sync;
@@ -1470,6 +1522,22 @@ impl AppDelegate {
             let dir = self.notes_dir().to_string_lossy().into_owned();
             std::thread::spawn(move || run_git_push(dir));
         }
+    }
+
+    /// If startup_mode is Persist, write the current editor mode to settings.json.
+    fn save_persisted_mode(&self) {
+        let startup_mode = self.ivars().core.borrow().settings.startup_mode;
+        if startup_mode != StartupMode::Persist { return; }
+        let in_insert = self.ivars().editor.borrow().as_ref()
+            .map(|e| e.current_mode() == Mode::Insert)
+            .unwrap_or(false);
+        let settings_path = {
+            let mut core = self.ivars().core.borrow_mut();
+            core.settings.persisted_in_insert = in_insert;
+            core.data_dir.join("settings.json")
+        };
+        let core = self.ivars().core.borrow();
+        let _ = core.settings.save(&settings_path);
     }
 
     fn window_is_visible(&self) -> bool {
@@ -1590,7 +1658,7 @@ impl AppDelegate {
 
     fn build_settings_panel(&self, mtm: MainThreadMarker, s: &Settings) -> Retained<NSPanel> {
         let w = 320.0f64;
-        let h = 330.0f64;
+        let h = 368.0f64;
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h));
         let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
 
@@ -1614,12 +1682,12 @@ impl AppDelegate {
         let mode_lbl = make_label(
             mtm,
             "Editor Mode:",
-            NSRect::new(NSPoint::new(20.0, 276.0), NSSize::new(100.0, 22.0)),
+            NSRect::new(NSPoint::new(20.0, 314.0), NSSize::new(100.0, 22.0)),
         );
         unsafe { let _: () = msg_send![cv, addSubview: &*mode_lbl]; }
 
         // ── Segmented control ─────────────────────────────────────────────────
-        let seg_rect = NSRect::new(NSPoint::new(128.0, 272.0), NSSize::new(172.0, 28.0));
+        let seg_rect = NSRect::new(NSPoint::new(128.0, 310.0), NSSize::new(172.0, 28.0));
         let seg: Retained<NSSegmentedControl> = unsafe {
             msg_send_id![mtm.alloc::<NSSegmentedControl>(), initWithFrame: seg_rect]
         };
@@ -1637,6 +1705,34 @@ impl AppDelegate {
             let _: () = msg_send![&*seg, setSelectedSegment: sel_idx];
             let _: () = msg_send![&*seg, setTag: 100isize];
             let _: () = msg_send![cv, addSubview: &*seg];
+        }
+
+        // ── Startup mode ──────────────────────────────────────────────────────
+        let startup_lbl = make_label(
+            mtm,
+            "On open:",
+            NSRect::new(NSPoint::new(20.0, 268.0), NSSize::new(100.0, 22.0)),
+        );
+        unsafe { let _: () = msg_send![cv, addSubview: &*startup_lbl]; }
+
+        let startup_seg_rect = NSRect::new(NSPoint::new(128.0, 264.0), NSSize::new(172.0, 28.0));
+        let startup_seg: Retained<NSSegmentedControl> = unsafe {
+            msg_send_id![mtm.alloc::<NSSegmentedControl>(), initWithFrame: startup_seg_rect]
+        };
+        let startup_sel_idx: usize = match s.startup_mode {
+            StartupMode::Normal  => 0,
+            StartupMode::Insert  => 1,
+            StartupMode::Persist => 2,
+        };
+        unsafe {
+            let _: () = msg_send![&*startup_seg, setSegmentCount: 3usize];
+            for (i, lbl) in ["Normal", "Insert", "Persist"].iter().enumerate() {
+                let ns = NSString::from_str(lbl);
+                let _: () = msg_send![&*startup_seg, setLabel: &*ns forSegment: i];
+            }
+            let _: () = msg_send![&*startup_seg, setSelectedSegment: startup_sel_idx];
+            let _: () = msg_send![&*startup_seg, setTag: 107isize];
+            let _: () = msg_send![cv, addSubview: &*startup_seg];
         }
 
         // ── Close-on-focus-loss checkbox ──────────────────────────────────────
@@ -1715,7 +1811,7 @@ impl AppDelegate {
 
     fn apply_settings_from_panel(&self) {
         // Read values first, releasing the panel borrow before writing settings
-        let (motion_mode, close_on_focus, font_size, show_arrows, show_dots, show_mode, git_sync) = {
+        let (motion_mode, startup_mode, close_on_focus, font_size, show_arrows, show_dots, show_mode, git_sync) = {
             let panel_ref = self.ivars().settings_panel.borrow();
             let panel = match panel_ref.as_ref() {
                 Some(p) => p,
@@ -1760,13 +1856,24 @@ impl AppDelegate {
             let mode     = read_chk(105);
             let git_sync = read_chk(106);
 
-            (motion, close, fsize, arrows, dots, mode, git_sync)
+            let startup_seg: *mut AnyObject = unsafe { msg_send![cv, viewWithTag: 107isize] };
+            let startup_idx: usize = if !startup_seg.is_null() {
+                unsafe { msg_send![startup_seg, selectedSegment] }
+            } else { 0 };
+            let startup = match startup_idx {
+                1 => StartupMode::Insert,
+                2 => StartupMode::Persist,
+                _ => StartupMode::Normal,
+            };
+
+            (motion, startup, close, fsize, arrows, dots, mode, git_sync)
         }; // panel_ref borrow released here
 
         // Update and persist settings
         let settings_path = {
             let mut core = self.ivars().core.borrow_mut();
             core.settings.motion_mode         = motion_mode;
+            core.settings.startup_mode        = startup_mode;
             core.settings.close_on_focus_loss  = close_on_focus;
             core.settings.font_size           = font_size;
             core.settings.show_nav_arrows     = show_arrows;
@@ -1820,13 +1927,24 @@ impl AppDelegate {
     // ── Note management ───────────────────────────────────────────────────────
 
     fn load_current_note(&self) {
-        let content = {
+        let (content, startup_mode, persisted_insert) = {
             let core = self.ivars().core.borrow();
             let id   = core.store.id_at(core.current_note);
-            core.store.load_note(id)
+            let text = core.store.load_note(id);
+            (text, core.settings.startup_mode, core.settings.persisted_in_insert)
         };
         if let Some(editor) = self.ivars().editor.borrow().as_ref() {
             editor.load_content(&content);
+            // Apply startup mode. load_content always resets engine to Normal;
+            // override here when the user wants Insert or the persisted mode.
+            let want_insert = match startup_mode {
+                StartupMode::Insert  => true,
+                StartupMode::Persist => persisted_insert,
+                StartupMode::Normal  => false,
+            };
+            if want_insert {
+                editor.set_initial_mode_insert();
+            }
         }
         self.update_page_dots();
         self.update_mode_label();
@@ -1962,6 +2080,13 @@ fn nsevent_to_key(event: &NSEvent) -> Option<Key> {
         125 => return Some(Key::Down),
         126 => return Some(Key::Up),
         _   => {}
+    }
+
+    // Don't intercept Command-modified keys (Cmd+C/V/X/Z/A etc.) — let them
+    // fall through to NSTextView's performKeyEquivalent: / responder chain.
+    let flags = unsafe { event.modifierFlags() };
+    if flags.contains(NSEventModifierFlags::NSEventModifierFlagCommand) {
+        return None;
     }
 
     let chars_ns: Option<Retained<NSString>> =
