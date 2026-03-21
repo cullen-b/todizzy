@@ -598,7 +598,9 @@ impl EditorView {
     pub fn load_content(&self, text: &str) {
         {
             let mut eng = self.ivars().engine.borrow_mut();
+            let saved_mode = eng.mode.clone();
             eng.set_content(text.to_owned());
+            eng.mode = saved_mode;
         }
         self.apply_nsview_string(text);
         // apply_nsview_string now preserves scroll position; for a fresh note
@@ -1093,7 +1095,7 @@ impl AppDelegate {
         self.setup_status_bar(mtm);
         self.setup_window(mtm);
         self.subscribe_notifications();
-        self.load_current_note();
+        self.load_current_note(true);
     }
 
     // ── Status bar ────────────────────────────────────────────────────────────
@@ -1433,7 +1435,7 @@ impl AppDelegate {
 
     fn show_window(&self) {
         // Show immediately with current local content — no blocking.
-        self.load_current_note();
+        self.load_current_note(true);
 
         // Restore previous position if the user dragged the window AND the saved
         // position is on the same screen as the status bar button. Otherwise
@@ -1629,7 +1631,7 @@ impl AppDelegate {
                 .map(|e| e.current_content() == pre_content)
                 .unwrap_or(false);
             if unchanged {
-                self.load_current_note();
+                self.load_current_note(false);
             }
         }
     }
@@ -1926,7 +1928,12 @@ impl AppDelegate {
 
     // ── Note management ───────────────────────────────────────────────────────
 
-    fn load_current_note(&self) {
+    /// Load the current note into the editor.
+    /// `apply_startup_mode`: when true, honour the startup-mode setting
+    /// (used when the window first opens). When false, keep the current
+    /// editor mode — used when navigating between pages so the user stays
+    /// in Normal mode rather than being dropped into Insert.
+    fn load_current_note(&self, apply_startup_mode: bool) {
         let (content, startup_mode, persisted_insert) = {
             let core = self.ivars().core.borrow();
             let id   = core.store.id_at(core.current_note);
@@ -1935,15 +1942,15 @@ impl AppDelegate {
         };
         if let Some(editor) = self.ivars().editor.borrow().as_ref() {
             editor.load_content(&content);
-            // Apply startup mode. load_content always resets engine to Normal;
-            // override here when the user wants Insert or the persisted mode.
-            let want_insert = match startup_mode {
-                StartupMode::Insert  => true,
-                StartupMode::Persist => persisted_insert,
-                StartupMode::Normal  => false,
-            };
-            if want_insert {
-                editor.set_initial_mode_insert();
+            if apply_startup_mode {
+                let want_insert = match startup_mode {
+                    StartupMode::Insert  => true,
+                    StartupMode::Persist => persisted_insert,
+                    StartupMode::Normal  => false,
+                };
+                if want_insert {
+                    editor.set_initial_mode_insert();
+                }
             }
         }
         self.update_page_dots();
@@ -2012,7 +2019,7 @@ impl AppDelegate {
                 core.current_note += 1;
             }
         }
-        self.load_current_note();
+        self.load_current_note(false);
     }
 
     fn go_prev_note(&self) {
@@ -2023,7 +2030,7 @@ impl AppDelegate {
                 core.current_note -= 1;
             }
         }
-        self.load_current_note();
+        self.load_current_note(false);
     }
 
 }
