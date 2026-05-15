@@ -16,6 +16,8 @@ bundle: build
 	@mkdir -p $(CONTENTS)/Resources
 	@cp target/release/$(BINARY) $(CONTENTS)/MacOS/$(BINARY)
 	@cp Info.plist $(CONTENTS)/Info.plist
+	@codesign --force --deep --sign - $(BUNDLE_DIR)
+	@xattr -dr com.apple.quarantine $(BUNDLE_DIR) 2>/dev/null || true
 	@echo "✓ Bundle: $(BUNDLE_DIR)"
 
 run: bundle
