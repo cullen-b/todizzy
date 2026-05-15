@@ -52,9 +52,10 @@ jobs:
           mkdir -p Todizzy.app/Contents/Resources
           cp todizzy-universal Todizzy.app/Contents/MacOS/todizzy
           cp Info.plist Todizzy.app/Contents/
+          codesign --force --deep --sign - Todizzy.app
 
       - name: Zip
-        run: zip -r Todizzy.zip Todizzy.app
+        run: ditto -c -k --keepParent Todizzy.app Todizzy.zip
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
