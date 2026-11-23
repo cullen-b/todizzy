@@ -18,7 +18,7 @@
 /// Communication: EditorView → AppDelegate via NSNotificationCenter.
 /// This keeps EditorView free of a back-reference (no retain cycle).
 
-use std::{cell::{Cell, RefCell}, path::PathBuf};
+use std::{cell::{Cell, RefCell}, path::PathBuf, time::{Duration, Instant}};
 
 use objc2::{
     declare_class, msg_send, msg_send_id,
@@ -907,7 +907,11 @@ struct AppDelegateIvars {
     nav_next_btn:        RefCell<Option<Retained<NSButton>>>,
     saved_window_origin: RefCell<Option<NSPoint>>,
     pre_pull_content:    RefCell<Option<String>>,
+    shown_at:            Cell<Option<Instant>>,
 }
+
+/// Focus losses this soon after showing come from macOS settling activation, not the user.
+const RESIGN_GRACE: Duration = Duration::from_millis(400);
 
 declare_class!(
     struct AppDelegate;
@@ -935,6 +939,14 @@ declare_class!(
             false
         }
 
+        #[method(applicationShouldHandleReopen:hasVisibleWindows:)]
+        fn should_handle_reopen(&self, _app: &NSApplication, _visible: bool) -> bool {
+            if !self.window_is_visible() {
+                self.show_window();
+            }
+            false
+        }
+
         #[method(applicationWillTerminate:)]
         fn app_will_terminate(&self, _notif: &NSNotification) {
             self.save_persisted_mode();
@@ -948,6 +960,15 @@ declare_class!(
         fn window_did_resign_key(&self, _notif: &NSNotification) {
             let close = self.ivars().core.borrow().settings.close_on_focus_loss;
             if !close {
+                return;
+            }
+            let just_shown = self.ivars().shown_at.get()
+                .map_or(false, |t| t.elapsed() < RESIGN_GRACE);
+            if just_shown {
+                if let Some(panel) = self.ivars().panel.borrow().as_ref() {
+                    let null: *const AnyObject = std::ptr::null();
+                    let _: () = unsafe { msg_send![&**panel, makeKeyAndOrderFront: null] };
+                }
                 return;
             }
             // Don't hide the editor if our own settings window is taking focus.
@@ -1083,6 +1104,7 @@ impl AppDelegate {
             nav_next_btn:        RefCell::new(None),
             saved_window_origin: RefCell::new(None),
             pre_pull_content:    RefCell::new(None),
+            shown_at:            Cell::new(None),
         };
         let this = mtm.alloc::<Self>().set_ivars(ivars);
         unsafe { msg_send_id![super(this), init] }
@@ -1206,7 +1228,9 @@ impl AppDelegate {
         let style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Resizable
-            | NSWindowStyleMask::FullSizeContentView;
+            | NSWindowStyleMask::FullSizeContentView
+            // Lets the panel take key focus even when macOS refuses to activate the app.
+            | NSWindowStyleMask::NonactivatingPanel;
 
         let panel: Retained<NSPanel> = unsafe {
             msg_send_id![
@@ -1463,11 +1487,8 @@ impl AppDelegate {
         }
         if let Some(panel) = self.ivars().panel.borrow().as_ref() {
             unsafe {
-                // For a menu-bar accessory app, we must explicitly activate
-                // so the panel can receive key events on every show cycle.
-                let mtm = MainThreadMarker::new_unchecked();
-                let app = NSApplication::sharedApplication(mtm);
-                let _: () = msg_send![&*app, activateIgnoringOtherApps: true];
+                activate_app();
+                self.ivars().shown_at.set(Some(Instant::now()));
 
                 let null: *const AnyObject = std::ptr::null();
                 let _: () = msg_send![&**panel, makeKeyAndOrderFront: null];
@@ -1651,6 +1672,7 @@ impl AppDelegate {
 
         unsafe {
             let _: () = msg_send![&*panel, center];
+            activate_app();
             let null: *const AnyObject = std::ptr::null();
             let _: () = msg_send![&*panel, makeKeyAndOrderFront: null];
         }
@@ -2122,6 +2144,19 @@ fn utf16_to_utf8(s: &str, utf16: usize) -> usize {
         byte_pos += c.len_utf8();
     }
     byte_pos
+}
+
+/// Best-effort app activation: `activate` on macOS 14+, the deprecated call before that.
+fn activate_app() {
+    unsafe {
+        let app = NSApplication::sharedApplication(MainThreadMarker::new_unchecked());
+        let has_activate: bool = msg_send![&*app, respondsToSelector: objc2::sel!(activate)];
+        if has_activate {
+            let _: () = msg_send![&*app, activate];
+        } else {
+            let _: () = msg_send![&*app, activateIgnoringOtherApps: true];
+        }
+    }
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
